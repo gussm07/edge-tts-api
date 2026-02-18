@@ -1,5 +1,5 @@
 const express = require('express');
-const edgeTTS = require('edge-tts');
+const { MsEdgeTTS, OUTPUT_FORMAT } = require('edge-tts-node');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -18,18 +18,26 @@ app.post('/tts', async (req, res) => {
   const outputPath = path.join('/tmp', filename);
 
   try {
-    const tts = new edgeTTS.EdgeTTS();
-    await tts.tts(text, voice, outputPath);
+    const tts = new MsEdgeTTS();
+    await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_96KBITRATE_MONO_MP3);
+    const readable = await tts.toStream(text);
 
-    res.setHeader('Content-Type', 'audio/mpeg');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    const writeStream = fs.createWriteStream(outputPath);
+    readable.pipe(writeStream);
 
-    const stream = fs.createReadStream(outputPath);
-    stream.pipe(res);
-
-    stream.on('end', () => {
-      fs.unlink(outputPath, () => {});
+    writeStream.on('finish', () => {
+      res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      const readStream = fs.createReadStream(outputPath);
+      readStream.pipe(res);
+      readStream.on('end', () => fs.unlink(outputPath, () => {}));
     });
+
+    writeStream.on('error', (err) => {
+      console.error(err);
+      res.status(500).json({ error: err.message });
+    });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
