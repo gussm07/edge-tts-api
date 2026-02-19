@@ -1,44 +1,66 @@
 const express = require('express');
-const { MsEdgeTTS, OUTPUT_FORMAT } = require('msedge-tts');
-const { Readable } = require('stream');
-
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 app.post('/tts', async (req, res) => {
-  const { text, voice = 'es-MX-JorgeNeural' } = req.body;
+  const { text, voice = 'es-US-Neural2-B' } = req.body;
 
   if (!text) {
     return res.status(400).json({ error: 'text is required' });
   }
 
   try {
-    const tts = new MsEdgeTTS();
-    await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_96KBITRATE_MONO_MP3);
+    const response = await fetch('https://texttospeech.googleapis.com/v1/text:synthesize', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${await getAccessToken()}`
+      },
+      body: JSON.stringify({
+        input: { text },
+        voice: {
+          languageCode: 'es-US',
+          name: voice,
+          ssmlGender: 'MALE'
+        },
+        audioConfig: {
+          audioEncoding: 'MP3',
+          speakingRate: 0.95,
+          pitch: -1.0
+        }
+      })
+    });
 
-    const { audioStream } = await tts.toStream(text);
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error('TTS API error:', data);
+      return res.status(500).json({ error: data.error?.message || 'TTS API error' });
+    }
+
+    const audioBuffer = Buffer.from(data.audioContent, 'base64');
 
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Content-Disposition', 'attachment; filename="audio.mp3"');
-
-    audioStream.pipe(res);
-
-    audioStream.on('error', (err) => {
-      console.error('Stream error:', err);
-      if (!res.headersSent) {
-        res.status(500).json({ error: err.message });
-      }
-    });
+    res.send(audioBuffer);
 
   } catch (err) {
-    console.error('TTS error:', err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: err.message });
-    }
+    console.error('Error:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
+// Obtiene el access token del service account de Cloud Run automáticamente
+async function getAccessToken() {
+  const response = await fetch(
+    'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token',
+    { headers: { 'Metadata-Flavor': 'Google' } }
+  );
+  const data = await response.json();
+  return data.access_token;
+}
+
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Edge TTS API corriendo en puerto ${PORT}`));
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => console.log(`TTS API corriendo en puerto ${PORT}`));
