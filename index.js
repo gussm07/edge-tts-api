@@ -2,6 +2,7 @@ const express = require('express');
 const fs = require('fs');
 const crypto = require('crypto');
 const { exec } = require('child_process');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -67,6 +68,20 @@ app.post('/merge', async (req, res) => {
     console.error('Merge error:', err);
     if (!res.headersSent) res.status(500).json({ error: err.message });
   }
+});
+
+app.post('/kling-token', (req, res) => {
+  const accessKey = process.env.KLING_ACCESS_KEY;
+  const secretKey = process.env.KLING_SECRET_KEY;
+
+  const payload = {
+    iss: accessKey,
+    exp: Math.floor(Date.now() / 1000) + 1800,
+    nbf: Math.floor(Date.now() / 1000) - 5
+  };
+
+  const token = jwt.sign(payload, secretKey, { algorithm: 'HS256', header: { alg: 'HS256', typ: 'JWT' } });
+  res.json({ token });
 });
 
 async function getAccessToken() {
