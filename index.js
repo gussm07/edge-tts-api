@@ -84,6 +84,57 @@ app.post('/kling-token', (req, res) => {
   res.json({ token });
 });
 
+app.post('/mix', async (req, res) => {
+  const { video_url, narration_url } = req.body;
+
+  if (!video_url || !narration_url) {
+    return res.status(400).json({ error: 'video_url and narration_url are required' });
+  }
+
+  const tmpDir = `/tmp/${crypto.randomUUID()}`;
+  await fs.promises.mkdir(tmpDir);
+
+  const videoPath = `${tmpDir}/video.mp4`;
+  const narrationPath = `${tmpDir}/narration.mp3`;
+  const outputPath = `${tmpDir}/final.mp4`;
+
+  try {
+    // Descargar video y narración en paralelo
+    const [videoRes, narrationRes] = await Promise.all([
+      fetch(video_url),
+      fetch(narration_url)
+    ]);
+
+    await Promise.all([
+      fs.promises.writeFile(videoPath, Buffer.from(await videoRes.arrayBuffer())),
+      fs.promises.writeFile(narrationPath, Buffer.from(await narrationRes.arrayBuffer()))
+    ]);
+
+    // Mezclar audio original del video (volumen bajo) + narración (volumen alto)
+    await new Promise((resolve, reject) => {
+      exec(
+        `ffmpeg -i ${videoPath} -i ${narrationPath} \
+        -filter_complex "[0:a]volume=0.15[ambient];[1:a]volume=1.0[narration];[ambient][narration]amix=inputs=2:duration=longest[aout]" \
+        -map 0:v -map "[aout]" -c:v copy -c:a aac -shortest ${outputPath}`,
+        (error) => { if (error) reject(error); else resolve(); }
+      );
+    });
+
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', 'attachment; filename="final.mp4"');
+    const stream = fs.createReadStream(outputPath);
+    stream.pipe(res);
+    stream.on('end', () => {
+      fs.rm(tmpDir, { recursive: true }, () => {});
+    });
+
+  } catch (err) {
+    console.error('Mix error:', err);
+    fs.rm(tmpDir, { recursive: true }, () => {});
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
+});
+
 async function getAccessToken() {
   const response = await fetch(
     'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token',
