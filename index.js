@@ -85,10 +85,10 @@ app.post('/kling-token', (req, res) => {
 });
 
 app.post('/mix', async (req, res) => {
-  const { video_url, narration_url } = req.body;
+  const { video_url, narration_base64, narration_url } = req.body;
 
-  if (!video_url || !narration_url) {
-    return res.status(400).json({ error: 'video_url and narration_url are required' });
+  if (!video_url || (!narration_base64 && !narration_url)) {
+    return res.status(400).json({ error: 'video_url and narration required' });
   }
 
   const tmpDir = `/tmp/${crypto.randomUUID()}`;
@@ -99,18 +99,18 @@ app.post('/mix', async (req, res) => {
   const outputPath = `${tmpDir}/final.mp4`;
 
   try {
-    // Descargar video y narración en paralelo
-    const [videoRes, narrationRes] = await Promise.all([
-      fetch(video_url),
-      fetch(narration_url)
-    ]);
+    // Descargar video
+    const videoRes = await fetch(video_url);
+    await fs.promises.writeFile(videoPath, Buffer.from(await videoRes.arrayBuffer()));
 
-    await Promise.all([
-      fs.promises.writeFile(videoPath, Buffer.from(await videoRes.arrayBuffer())),
-      fs.promises.writeFile(narrationPath, Buffer.from(await narrationRes.arrayBuffer()))
-    ]);
+    // Narración — desde base64 o URL
+    if (narration_base64) {
+      await fs.promises.writeFile(narrationPath, Buffer.from(narration_base64, 'base64'));
+    } else {
+      const narrationRes = await fetch(narration_url);
+      await fs.promises.writeFile(narrationPath, Buffer.from(await narrationRes.arrayBuffer()));
+    }
 
-    // Mezclar audio original del video (volumen bajo) + narración (volumen alto)
     await new Promise((resolve, reject) => {
       exec(
         `ffmpeg -i ${videoPath} -i ${narrationPath} \
