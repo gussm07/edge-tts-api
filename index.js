@@ -84,32 +84,27 @@ app.post('/kling-token', (req, res) => {
   res.json({ token });
 });
 
-app.post('/mix', async (req, res) => {
-  const { video_url, narration_base64, narration_url } = req.body;
+const multer = require('multer');
+const upload = multer({ dest: '/tmp/' });
 
-  if (!video_url || (!narration_base64 && !narration_url)) {
-    return res.status(400).json({ error: 'video_url and narration required' });
+app.post('/mix', upload.single('narration'), async (req, res) => {
+  const { video_url } = req.body;
+  const narrationFile = req.file;
+
+  if (!video_url || !narrationFile) {
+    return res.status(400).json({ error: 'video_url and narration file required' });
   }
 
   const tmpDir = `/tmp/${crypto.randomUUID()}`;
   await fs.promises.mkdir(tmpDir);
 
   const videoPath = `${tmpDir}/video.mp4`;
-  const narrationPath = `${tmpDir}/narration.mp3`;
+  const narrationPath = narrationFile.path;
   const outputPath = `${tmpDir}/final.mp4`;
 
   try {
-    // Descargar video
     const videoRes = await fetch(video_url);
     await fs.promises.writeFile(videoPath, Buffer.from(await videoRes.arrayBuffer()));
-
-    // Narración — desde base64 o URL
-    if (narration_base64) {
-      await fs.promises.writeFile(narrationPath, Buffer.from(narration_base64, 'base64'));
-    } else {
-      const narrationRes = await fetch(narration_url);
-      await fs.promises.writeFile(narrationPath, Buffer.from(await narrationRes.arrayBuffer()));
-    }
 
     await new Promise((resolve, reject) => {
       exec(
@@ -121,11 +116,11 @@ app.post('/mix', async (req, res) => {
     });
 
     res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Content-Disposition', 'attachment; filename="final.mp4"');
     const stream = fs.createReadStream(outputPath);
     stream.pipe(res);
     stream.on('end', () => {
       fs.rm(tmpDir, { recursive: true }, () => {});
+      fs.unlink(narrationPath, () => {});
     });
 
   } catch (err) {
