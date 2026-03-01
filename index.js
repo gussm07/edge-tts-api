@@ -11,28 +11,77 @@ app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.post('/tts', async (req, res) => {
   const { text, voice = 'es-US-Neural2-B' } = req.body;
+
   if (!text) return res.status(400).json({ error: 'text is required' });
+
+  const tmpDir = `/tmp/${crypto.randomUUID()}`;
+  await fs.promises.mkdir(tmpDir, { recursive: true });
+
   try {
-    const response = await fetch('https://texttospeech.googleapis.com/v1/text:synthesize', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${await getAccessToken()}`
-      },
-      body: JSON.stringify({
-        input: { text },
-        voice: { languageCode: 'es-US', name: voice, ssmlGender: 'MALE' },
-        audioConfig: { audioEncoding: 'MP3', speakingRate: 0.95, pitch: -1.0 }
-      })
-    });
-    const data = await response.json();
-    if (!response.ok) return res.status(500).json({ error: data.error?.message });
-    const audioBuffer = Buffer.from(data.audioContent, 'base64');
+    // Dividir texto en chunks de 4500 bytes
+    const chunks = [];
+    const sentences = text.split(/(?<=[.!?])\s+/);
+    let current = '';
+
+    for (const sentence of sentences) {
+      const candidate = current ? current + ' ' + sentence : sentence;
+      if (Buffer.byteLength(candidate, 'utf8') > 4500) {
+        if (current) chunks.push(current);
+        current = sentence;
+      } else {
+        current = candidate;
+      }
+    }
+    if (current) chunks.push(current);
+
+    // Generar audio para cada chunk
+    const chunkPaths = [];
+    for (const [i, chunk] of chunks.entries()) {
+      const chunkPath = `${tmpDir}/chunk_${i}.mp3`;
+
+      const ttsResponse = await fetch(
+        `https://texttospeech.googleapis.com/v1/text:synthesize?key=${process.env.GOOGLE_TTS_KEY}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            input: { text: chunk },
+            voice: { languageCode: 'es-US', name: voice },
+            audioConfig: { audioEncoding: 'MP3' }
+          })
+        }
+      );
+
+      const ttsData = await ttsResponse.json();
+      if (!ttsData.audioContent) throw new Error(`TTS chunk ${i} failed: ${JSON.stringify(ttsData)}`);
+
+      await fs.promises.writeFile(chunkPath, Buffer.from(ttsData.audioContent, 'base64'));
+      chunkPaths.push(chunkPath);
+    }
+
+    // Concatenar todos los chunks de audio
+    const outputPath = `${tmpDir}/narration.mp3`;
+
+    if (chunkPaths.length === 1) {
+      await fs.promises.copyFile(chunkPaths[0], outputPath);
+    } else {
+      const concatFile = `${tmpDir}/concat_audio.txt`;
+      await fs.promises.writeFile(concatFile, chunkPaths.map(p => `file '${p}'`).join('\n'));
+      await new Promise((resolve, reject) => {
+        exec(`ffmpeg -f concat -safe 0 -i ${concatFile} -c:a copy ${outputPath}`,
+          err => err ? reject(err) : resolve());
+      });
+    }
+
     res.setHeader('Content-Type', 'audio/mpeg');
-    res.setHeader('Content-Disposition', 'attachment; filename="audio.mp3"');
-    res.send(audioBuffer);
+    res.setHeader('Content-Disposition', 'attachment; filename="narration.mp3"');
+    const stream = fs.createReadStream(outputPath);
+    stream.pipe(res);
+    stream.on('end', () => fs.rm(tmpDir, { recursive: true }, () => {}));
+
   } catch (err) {
     console.error('TTS error:', err);
+    fs.rm(tmpDir, { recursive: true }, () => {});
     if (!res.headersSent) res.status(500).json({ error: err.message });
   }
 });
