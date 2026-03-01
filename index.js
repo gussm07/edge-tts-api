@@ -130,6 +130,131 @@ app.post('/mix', upload.single('narration'), async (req, res) => {
   }
 });
 
+app.post('/assemble', async (req, res) => {
+  const { clips, archive_images, subtitles, map_base64, audio_base64 } = req.body;
+
+  const tmpDir = `/tmp/${crypto.randomUUID()}`;
+  await fs.promises.mkdir(tmpDir, { recursive: true });
+
+  try {
+    // Descargar clips Veo 3
+    const clipPaths = await Promise.all(clips.map(async (url, i) => {
+      const path = `${tmpDir}/clip_${i}.mp4`;
+      const r = await fetch(url);
+      await fs.promises.writeFile(path, Buffer.from(await r.arrayBuffer()));
+      return path;
+    }));
+
+    // Descargar imágenes Pexels
+    const imgPaths = await Promise.all(archive_images.slice(0, 3).map(async (url, i) => {
+      const path = `${tmpDir}/archive_${i}.jpg`;
+      try {
+        const r = await fetch(url);
+        await fs.promises.writeFile(path, Buffer.from(await r.arrayBuffer()));
+        return path;
+      } catch { return null; }
+    }));
+
+    // Guardar mapa desde base64
+    const mapPath = `${tmpDir}/map.png`;
+    if (map_base64) {
+      await fs.promises.writeFile(mapPath, Buffer.from(map_base64, 'base64'));
+    }
+
+    // Guardar audio desde base64
+    const audioPath = `${tmpDir}/narration.mp3`;
+    if (audio_base64) {
+      await fs.promises.writeFile(audioPath, Buffer.from(audio_base64, 'base64'));
+    }
+
+    // Convertir imágenes a video 5 seg
+    const imgVideoPaths = [];
+    for (const [i, imgPath] of imgPaths.entries()) {
+      if (!imgPath) continue;
+      const outPath = `${tmpDir}/img_video_${i}.mp4`;
+      await new Promise((resolve, reject) => {
+        exec(`ffmpeg -loop 1 -i ${imgPath} -c:v libx264 -t 5 -pix_fmt yuv420p -vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2" ${outPath}`,
+          err => err ? reject(err) : resolve());
+      });
+      imgVideoPaths.push(outPath);
+    }
+
+    // Convertir mapa a video 8 seg
+    const mapVideoPath = `${tmpDir}/map_video.mp4`;
+    if (map_base64) {
+      await new Promise((resolve, reject) => {
+        exec(`ffmpeg -loop 1 -i ${mapPath} -c:v libx264 -t 8 -pix_fmt yuv420p -vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2" ${mapVideoPath}`,
+          err => err ? reject(err) : resolve());
+      });
+    }
+
+    // Crear concat.txt
+    const segments = [];
+    segments.push(`file '${clipPaths[0]}'`);
+    if (map_base64) segments.push(`file '${mapVideoPath}'`);
+    segments.push(`file '${clipPaths[1]}'`);
+    if (imgVideoPaths[0]) segments.push(`file '${imgVideoPaths[0]}'`);
+    segments.push(`file '${clipPaths[2]}'`);
+    segments.push(`file '${clipPaths[3]}'`);
+    if (imgVideoPaths[1]) segments.push(`file '${imgVideoPaths[1]}'`);
+    segments.push(`file '${clipPaths[4]}'`);
+    segments.push(`file '${clipPaths[5]}'`);
+    if (imgVideoPaths[2]) segments.push(`file '${imgVideoPaths[2]}'`);
+    segments.push(`file '${clipPaths[6]}'`);
+    segments.push(`file '${clipPaths[7]}'`);
+
+    const concatFile = `${tmpDir}/concat.txt`;
+    await fs.promises.writeFile(concatFile, segments.join('\n'));
+
+    // Concatenar
+    const concatPath = `${tmpDir}/concat.mp4`;
+    await new Promise((resolve, reject) => {
+      exec(`ffmpeg -f concat -safe 0 -i ${concatFile} -c:v libx264 -pix_fmt yuv420p ${concatPath}`,
+        err => err ? reject(err) : resolve());
+    });
+
+    // Quemar subtítulos
+    const subsArr = typeof subtitles === 'string' ? JSON.parse(subtitles) : subtitles;
+    const filters = subsArr.map(s => {
+      const clean = s.text
+        .replace(/'/g, '\u2019')
+        .replace(/:/g, '\\:')
+        .replace(/[^\w\s\u00C0-\u024F\u2019\?\!\.\,👇]/g, '');
+      return `drawtext=text='${clean}':fontsize=36:fontcolor=white:bordercolor=black:borderw=3:x=(w-text_w)/2:y=h-80:enable='between(t\\,${s.time}\\,${s.time + 5})'`;
+    }).join(',');
+
+    const subtitledPath = `${tmpDir}/subtitled.mp4`;
+    await new Promise((resolve, reject) => {
+      exec(`ffmpeg -i ${concatPath} -vf "${filters}" -c:v libx264 -c:a copy ${subtitledPath}`,
+        err => err ? reject(err) : resolve());
+    });
+
+    // Mezclar audio
+    const outputPath = `${tmpDir}/final.mp4`;
+    if (audio_base64) {
+      await new Promise((resolve, reject) => {
+        exec(`ffmpeg -i ${subtitledPath} -i ${audioPath} \
+          -filter_complex "[0:a]volume=0.1[ambient];[1:a]volume=1.0[narration];[ambient][narration]amix=inputs=2:duration=longest[aout]" \
+          -map 0:v -map "[aout]" -c:v copy -c:a aac ${outputPath}`,
+          err => err ? reject(err) : resolve());
+      });
+    } else {
+      await fs.promises.copyFile(subtitledPath, outputPath);
+    }
+
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', 'attachment; filename="truecrime.mp4"');
+    const stream = fs.createReadStream(outputPath);
+    stream.pipe(res);
+    stream.on('end', () => fs.rm(tmpDir, { recursive: true }, () => {}));
+
+  } catch (err) {
+    console.error('Assemble error:', err);
+    fs.rm(tmpDir, { recursive: true }, () => {});
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
+});
+
 async function getAccessToken() {
   const response = await fetch(
     'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token',
